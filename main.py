@@ -7,6 +7,7 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from pymongo import MongoClient, DESCENDING
+from dotenv import load_dotenv
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = [
@@ -15,10 +16,18 @@ SCOPES = [
     'https://www.googleapis.com/auth/calendar.events'
 ]
 
-UNIVERSITY_CALENDAR_NAME = "Oud-Universiteit"
-BEAUTIFUL_UNIVERSITY = "Universiteit"
-DB_PORT = 27017
-DB_NAME = "AdjustIcal"
+load_dotenv()
+
+INCOMING_UNIVERSITY_NAME = os.environ.get("INCOMING_UNIVERSITY_NAME")
+NEW_UNIVERSITY_NAME = os.environ.get("NEW_UNIVERSITY_NAME")
+DB_PORT = int(os.environ.get("DB_PORT"))
+DB_NAME = os.environ.get("DB_NAME")
+
+EXAM_COLOR = os.environ.get("EXAM_COLOR")
+LESSON_COLOR = os.environ.get("LESSON_COLOR")
+LAB_COLOR = os.environ.get("LAB_COLOR")
+WORK_GROUP_COLOR = os.environ.get("WORK_GROUP_COLOR")
+OTHER_COLOR = os.environ.get("OTHER_COLOR")
 
 
 def check_credentials():
@@ -40,27 +49,30 @@ def check_credentials():
 
 
 def get_uni_calendar_ids(service):
+    # Get all the calendars information
     user_calendars = service.calendarList().list().execute().get("items", [])
-    calendar_id_from_uni = None
-    beautiful_uni_calendar_id = None
+    incoming_calendar_uni = None
+    new_university_calendar = None
     for calendarList in user_calendars:
+        # find the id's based on the summary or summaryOverride that should be equal to the calendar name provided in
+        # the .env file
         if "summaryOverride" in calendarList:
-            if calendarList['summaryOverride'] == UNIVERSITY_CALENDAR_NAME:
-                calendar_id_from_uni = calendarList["id"]
-            elif calendarList['summaryOverride'] == BEAUTIFUL_UNIVERSITY:
-                beautiful_uni_calendar_id = calendarList["id"]
+            if calendarList['summaryOverride'] == INCOMING_UNIVERSITY_NAME:
+                incoming_calendar_uni = calendarList["id"]
+            elif calendarList['summaryOverride'] == NEW_UNIVERSITY_NAME:
+                new_university_calendar = calendarList["id"]
         elif "summary" in calendarList:
-            if calendarList['summary'] == UNIVERSITY_CALENDAR_NAME:
-                calendar_id_from_uni = calendarList["id"]
-            elif calendarList['summary'] == BEAUTIFUL_UNIVERSITY:
-                beautiful_uni_calendar_id = calendarList["id"]
-    if calendar_id_from_uni is None:
+            if calendarList['summary'] == INCOMING_UNIVERSITY_NAME:
+                incoming_calendar_uni = calendarList["id"]
+            elif calendarList['summary'] == NEW_UNIVERSITY_NAME:
+                new_university_calendar = calendarList["id"]
+    if incoming_calendar_uni is None:
         raise Exception(
-            f"Please make sure you changed your university calendar to {UNIVERSITY_CALENDAR_NAME}")
-    elif beautiful_uni_calendar_id is None:
+            f"Please make sure you changed your university calendar to {INCOMING_UNIVERSITY_NAME}")
+    if new_university_calendar is None:
         raise Exception(
-            f"Please make sure you changed your new university calendar to {BEAUTIFUL_UNIVERSITY}")
-    return calendar_id_from_uni, beautiful_uni_calendar_id
+            f"Please make sure you changed your new university calendar to {NEW_UNIVERSITY_NAME}")
+    return incoming_calendar_uni, new_university_calendar
 
 
 def create_db_connection():
@@ -69,20 +81,16 @@ def create_db_connection():
 
 
 def set_color_id(summary):
-    # colorIds with their corresponding color are:
-    # 1 = light purple, 2 = light green, 3 = dark purple, 4 = light orange, 5 = yellow, 6 = bright orange,
-    # 7 = light blue, 8 = dark grey, 9 = dark blue, 10 = green, 11 = red
-
     if "Tentamen" in summary or "Hertentamen" in summary or "Deeltoets" in summary:
-        return "11"
+        return EXAM_COLOR
     elif "Hoorcollege" in summary:
-        return "1"
+        return LESSON_COLOR
     elif "Practicum" in summary:
-        return "2"
+        return LAB_COLOR
     elif "Werkgroep" in summary:
-        return "4"
+        return WORK_GROUP_COLOR
     else:
-        return "7"
+        return OTHER_COLOR
 
 
 def make_new_event(event):
@@ -114,27 +122,42 @@ def insert_unknown_event(db, event, service, cal_id):
 def insert_or_update_event(db, event, service, cal_id):
     old_event = db.events.find_one({"iCalUID": event["iCalUID"]})
     if old_event is None:
+        # Insert entry, when there isn't one in the database or calendar
         insert_unknown_event(db, event, service, cal_id)
-    elif event["status"] == "cancelled":
-        if check_update_diff_event(dict(), old_event, event) == {}:
-            corresponding_new_event = db.new_events.find_one({"eventIcalUID": event["iCalUID"]})
-            try:
-                inserted_event = service.events().delete(calendarId=cal_id, eventId=corresponding_new_event["eventInfo"]["id"]).execute()
+    else:
+        difference = check_update_diff_event(dict(), old_event, event)
+        if event["status"] == "cancelled":
+            if difference == {}:
+                # Delete entry from calendar, keep in database in case re-confirmed
+                corresponding_new_event = db.new_events.find_one({"eventIcalUID": event["iCalUID"]})
+                try:
+                    inserted_event = service.events().delete(
+                        calendarId=cal_id, eventId=corresponding_new_event["eventInfo"]["id"]
+                    ).execute()
+                    db.events.replace_one({"iCalUID": event["iCalUID"]}, event)
+                    db.new_events.update_one({"eventIcalUID": event["iCalUID"]}, {"$set": inserted_event})
+                except HttpError:
+                    pass
+        else:
+            if difference == {}:
+                # Update or re-insert event, if there are changes
+                new_event = db.new_events.find_one({"eventIcalUID": event["iCalUID"]})["eventInfo"]
+                if new_event["status"] == "cancelled":
+                    # if the event exist, but calendar entry has been deleted, re-insert based on changes and
+                    # older_new_event
+                    inserted_event = service.events().insert(
+                        calendarId=cal_id,
+                        body=check_update_diff_event(new_event, event, old_event)
+                    ).execute()
+                else:
+                    # if the event exist and calendar entry exists
+                    inserted_event = service.events().update(
+                        calendarId=cal_id,
+                        eventId =new_event["id"],
+                        body=check_update_diff_event(new_event, event, old_event)
+                    ).execute()
                 db.events.replace_one({"iCalUID": event["iCalUID"]}, event)
                 db.new_events.update_one({"eventIcalUID": event["iCalUID"]}, {"$set": inserted_event})
-            except HttpError:
-                pass
-    else:
-        if check_update_diff_event(dict(), old_event, event) == {}:
-            # Change or insert event here
-            new_event = db.new_events.find_one({"eventIcalUID": event["iCalUID"]})["eventInfo"]
-            inserted_event = service.events().update(
-                calendarId=cal_id,
-                eventId =new_event["id"],
-                body=check_update_diff_event(new_event, event, old_event)
-            ).execute()
-            db.events.replace_one({"iCalUID": event["iCalUID"]}, event)
-            db.new_events.update_one({"eventIcalUID": event["iCalUID"]}, {"$set": inserted_event})
 
 
 def get_latest_updated_min(db):
