@@ -2,6 +2,6 @@
 /.idea
 /venv
 
-
+.env
 credentials.json
 token.json
