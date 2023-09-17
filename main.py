@@ -68,7 +68,7 @@ def get_uni_calendar_ids(service):
                 new_university_calendar = calendarList["id"]
     if incoming_calendar_uni is None:
         raise Exception(
-            f"Please make sure you changed your university calendar to {INCOMING_UNIVERSITY_NAME}")
+            f"Please make sure you changed your incoming university calendar to {INCOMING_UNIVERSITY_NAME}")
     if new_university_calendar is None:
         raise Exception(
             f"Please make sure you changed your new university calendar to {NEW_UNIVERSITY_NAME}")
@@ -176,9 +176,10 @@ def main():
         university_id, new_university_id = get_uni_calendar_ids(service)
         db = create_db_connection()
 
+        min_updated = get_latest_updated_min(db)
+        events_executable = None
         while True:
-            if "events_executable" not in locals():
-                min_updated = get_latest_updated_min(db)
+            if events_executable is None:
                 if min_updated is None:
                     events_executable = service.events().list(
                         calendarId=university_id,
@@ -198,10 +199,11 @@ def main():
                     previous_request=events_executable, previous_response=events_result
                 )
 
-            if events_executable is None:
+            try:
+                events_result = events_executable.execute()
+            except:
                 break
 
-            events_result = events_executable.execute()
             events = events_result.get('items', [])
             if not events:
                 print('No upcoming events found.')
@@ -210,6 +212,7 @@ def main():
             for event in events:
                 print(event)
                 insert_or_update_event(db, event, service, new_university_id)
+
     except HttpError as error:
         print('An error occurred: %s' % error)
 
