@@ -105,6 +105,10 @@ def make_new_event(event):
 
 
 def check_update_diff_event(new_event, event, old_event):
+    if "_id" in old_event.keys():
+        del old_event["_id"]
+    if "_id" in event.keys():
+        del event ["_id"]
     diff = dd.diff(old_event, event)
     new_event = dd.patch(diff, new_event)
     return new_event
@@ -127,7 +131,7 @@ def insert_or_update_event(db, event, service, cal_id):
     else:
         difference = check_update_diff_event(dict(), old_event, event)
         if event["status"] == "cancelled":
-            if difference == {}:
+            if difference != {}:
                 # Delete entry from calendar, keep in database in case re-confirmed
                 corresponding_new_event = db.new_events.find_one({"eventIcalUID": event["iCalUID"]})
                 try:
@@ -139,7 +143,7 @@ def insert_or_update_event(db, event, service, cal_id):
                 except HttpError:
                     pass
         else:
-            if difference == {}:
+            if difference != {}:
                 # Update or re-insert event, if there are changes
                 new_event = db.new_events.find_one({"eventIcalUID": event["iCalUID"]})["eventInfo"]
                 if new_event["status"] == "cancelled":
