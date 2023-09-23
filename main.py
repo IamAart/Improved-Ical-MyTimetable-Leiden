@@ -1,13 +1,13 @@
 import os.path
-import dictdiffer as dd
 
+import dictdiffer as dd
+from dotenv import load_dotenv
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from pymongo import MongoClient, DESCENDING
-from dotenv import load_dotenv
 
 # If modifying these scopes, delete the file token.json.
 SCOPES = [
@@ -108,7 +108,7 @@ def check_update_diff_event(new_event, event, old_event):
     if "_id" in old_event.keys():
         del old_event["_id"]
     if "_id" in event.keys():
-        del event ["_id"]
+        del event["_id"]
     diff = dd.diff(old_event, event)
     new_event = dd.patch(diff, new_event)
     return new_event
@@ -128,6 +128,7 @@ def insert_or_update_event(db, event, service, cal_id):
     if old_event is None:
         # Insert entry, when there isn't one in the database or calendar
         insert_unknown_event(db, event, service, cal_id)
+        print(f"Inserted New Event: {event['summary']} at {event['start']['dateTime']} - {event['end']['dateTime']}")
     else:
         difference = check_update_diff_event(dict(), old_event, event)
         if event["status"] == "cancelled":
@@ -138,10 +139,14 @@ def insert_or_update_event(db, event, service, cal_id):
                     inserted_event = service.events().delete(
                         calendarId=cal_id, eventId=corresponding_new_event["eventInfo"]["id"]
                     ).execute()
+                    print(
+                        f"Cancelled Event: {event['summary']} at {event['start']['dateTime']} - {event['end']['dateTime']}")
                     db.events.replace_one({"iCalUID": event["iCalUID"]}, event)
                     db.new_events.update_one({"eventIcalUID": event["iCalUID"]}, {"$set": inserted_event})
                 except HttpError:
                     pass
+            else:
+                print(f"No changes for Event: {event['summary']} at {event['start']['dateTime']} - {event['end']['dateTime']}")
         else:
             if difference != {}:
                 # Update or re-insert event, if there are changes
@@ -153,15 +158,22 @@ def insert_or_update_event(db, event, service, cal_id):
                         calendarId=cal_id,
                         body=check_update_diff_event(new_event, event, old_event)
                     ).execute()
+                    print(
+                        f"New Inserted Old Cancelled Event: {event['summary']} at {event['start']['dateTime']} - {event['end']['dateTime']}")
                 else:
                     # if the event exist and calendar entry exists
                     inserted_event = service.events().update(
                         calendarId=cal_id,
-                        eventId =new_event["id"],
+                        eventId=new_event["id"],
                         body=check_update_diff_event(new_event, event, old_event)
                     ).execute()
+                    print(
+                        f"Updated Event: {event['summary']} at {event['start']['dateTime']} - {event['end']['dateTime']}")
                 db.events.replace_one({"iCalUID": event["iCalUID"]}, event)
                 db.new_events.update_one({"eventIcalUID": event["iCalUID"]}, {"$set": inserted_event})
+            else:
+                print(
+                    f"No changes for Event: {event['summary']} at {event['start']['dateTime']} - {event['end']['dateTime']}")
 
 
 def get_latest_updated_min(db):
@@ -176,6 +188,7 @@ def main():
     creds = check_credentials()
 
     try:
+
         service = build('calendar', 'v3', credentials=creds)
         university_id, new_university_id = get_uni_calendar_ids(service)
         db = create_db_connection()
@@ -199,6 +212,7 @@ def main():
                         showDeleted=True
                     )
             else:
+                # noinspection PyUnboundLocalVariable
                 events_executable = service.events().list_next(
                     previous_request=events_executable, previous_response=events_result
                 )
@@ -214,9 +228,7 @@ def main():
                 return
 
             for event in events:
-                print(event)
                 insert_or_update_event(db, event, service, new_university_id)
-
     except HttpError as error:
         print('An error occurred: %s' % error)
 
